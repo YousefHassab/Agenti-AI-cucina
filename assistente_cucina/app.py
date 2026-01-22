@@ -8,134 +8,112 @@ import urllib.parse
 load_dotenv()
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
-st.set_page_config(page_title="Multi-Agent Kitchen", layout="wide")
+st.set_page_config(page_title="AI Kitchen Multi-Agent", layout="wide")
 
-# 1. GESTIONE STATO E TOKEN (Richiesta 3)
+# 1. INIZIALIZZAZIONE STATO
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "data_extracted" not in st.session_state:
-    st.session_state.data_extracted = {"ingredienti": [], "vincoli": [], "image_prompt": ""}
+    st.session_state.data_extracted = {"ingredienti": [], "vincoli": []}
 if "total_tokens" not in st.session_state:
     st.session_state.total_tokens = 0
 
-TOKEN_LIMIT = 15000  # Soglia di sicurezza per il piano gratuito
+TOKEN_LIMIT = 15000
 
-# 2. DEFINIZIONE PROMPT MULTI-AGENTE (Richiesta 2)
-CHEF_PROMPT = """
-Sei lo CHEF. Il tuo compito è generare 3 ricette basandoti ESATTAMENTE sui dati forniti.
-Rispetta dosi, scadenze e vincoli di salute (es. no sale).
-Dopo le ricette, scrivi '---JSON_DATA---' e il JSON aggiornato con un 'image_prompt' per la ricetta migliore.
-"""
-
-CRITIC_PROMPT = """
-Sei il CRITICO GASTRONOMICO. Il tuo compito è verificare che lo CHEF non abbia fatto errori.
-Controlla:
-1. Ha usato gli ingredienti corretti?
-2. Ha rispettato i vincoli di salute (es. se l'utente ha detto 'niente sale', lo Chef ha messo il sale?)?
-3. Le quantità sono sensate?
-
-Rispondi SOLO in questo formato:
-ESITO: [APPROVATO oppure RIFIUTATO]
-MOTIVAZIONE: [Spiega perché, se hai rifiutato]
-"""
-
-st.title("👨‍🍳 Sistema Multi-Agente: Chef & Critico")
-
-# SIDEBAR POTENZIATA
+# 2. SIDEBAR (Monitoraggio e Strategia Anti-Blocco)
 with st.sidebar:
-    st.header("📊 Monitoraggio Sistema")
+    st.header("⚖️ Monitoraggio Risorse")
+    st.metric("Token Consumati", f"{st.session_state.total_tokens} / {TOKEN_LIMIT}")
     
-    # Visualizzazione Token (Richiesta 3)
-    token_perc = (st.session_state.total_tokens / TOKEN_LIMIT)
-    st.metric("Token Utilizzati", f"{st.session_state.total_tokens} / {TOKEN_LIMIT}")
-    st.progress(min(token_perc, 1.0))
+    progress = min(st.session_state.total_tokens / TOKEN_LIMIT, 1.0)
+    st.progress(progress)
     
-    if st.session_state.total_tokens > TOKEN_LIMIT * 0.9:
-        st.warning("⚠️ Attenzione: Sei vicino al limite di token!")
+    if st.session_state.total_tokens >= TOKEN_LIMIT:
+        st.error("🛑 LIMITE RAGGIUNTO: Il sistema è bloccato per esaurimento token.")
 
     st.divider()
-    st.subheader("🛒 Dispensa & Vincoli")
-    st.json(st.session_state.data_extracted)
+    st.header("🗄️ Stato Dispensa")
+    data = st.session_state.data_extracted
+    
+    # PROTEZIONE ANTI-CRASH: controlliamo che ogni ingrediente sia un dizionario
+    for ing in data.get("ingredienti", []):
+        if isinstance(ing, dict):
+            st.write(f"🍴 {ing.get('nome', 'Sconosciuto')} ({ing.get('qta','?')})")
+        else:
+            st.write(f"🍴 {ing}") # Se è una stringa, la scriviamo così com'è
+            
+    for v in data.get("vincoli", []):
+        st.error(f"🚫 {v}")
     
     if st.button("Reset Totale"):
         st.session_state.messages = []
         st.session_state.total_tokens = 0
-        st.session_state.data_extracted = {"ingredienti": [], "vincoli": [], "image_prompt": ""}
+        st.session_state.data_extracted = {"ingredienti": [], "vincoli": []}
         st.rerun()
 
-# Logica Chat
+# 3. PROMPT AGENTI
+CHEF_PROMPT = "Sei lo CHEF. Proponi 3 ricette. Alla fine scrivi '---JSON---' e il JSON aggiornato con ingredienti, vincoli e un 'image_prompt'."
+CRITIC_PROMPT = "Sei il CRITICO. Rispondi 'ESITO: APPROVATO' se la ricetta rispetta i vincoli, altrimenti 'ESITO: RIFIUTATO' con i motivi."
+
+st.title("👨‍🍳 Multi-Agent Kitchen: Chef & Critico")
+
+# Visualizzazione Chat
 for m in st.session_state.messages:
     with st.chat_message(m["role"]): st.markdown(m["content"])
 
-if prompt := st.chat_input("Cosa cuciniamo?"):
+# 4. LOGICA DI CONTROLLO BLOCCANTE
+if prompt := st.chat_input("Inserisci ingredienti o vincoli..."):
     if st.session_state.total_tokens >= TOKEN_LIMIT:
-        st.error("ERRORE: Limite token raggiunto. Impossibile continuare la sessione.")
+        # Se siamo fuori limite, mostriamo solo l'errore e non facciamo nulla
+        st.error("❌ OPERAZIONE NEGATA: Limite di 15.000 token raggiunto. Reset necessario per continuare.")
     else:
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"): st.markdown(prompt)
 
-        # In questo passo abbiamo impostato la struttura, nel prossimo 
-        # implementeremo il ciclo di validazione Chef -> Critico.
-        st.info("Struttura pronta. Clicca 'fatto' per attivare il ciclo Multi-Agente.")
+        with st.chat_message("assistant"):
+            try:
+                # CHIAMATA CHEF
+                history = [{"role": "system", "content": CHEF_PROMPT}] + \
+                          [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages]
+                
+                res_chef = client.chat.completions.create(model="llama-3.1-8b-instant", messages=history)
+                chef_out = res_chef.choices[0].message.content
+                st.session_state.total_tokens += res_chef.usage.total_tokens
 
-    with st.chat_message("assistant"):
-        # --- FASE 1: CHIAMATA ALLO CHEF ---
-        msg_chef = [{"role": "system", "content": CHEF_PROMPT}] + \
-                   [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages]
-        
-        res_chef = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=msg_chef,
-            temperature=0.7
-        )
-        
-        chef_text = res_chef.choices[0].message.content
-        st.session_state.total_tokens += res_chef.usage.total_tokens # Aggiorna token (Richiesta 3)
+                # CHIAMATA CRITICO
+                critic_in = [
+                    {"role": "system", "content": CRITIC_PROMPT},
+                    {"role": "user", "content": f"Ricetta Chef: {chef_out}\nVincoli attuali: {st.session_state.data_extracted}"}
+                ]
+                res_critic = client.chat.completions.create(model="llama-3.1-8b-instant", messages=critic_in)
+                critic_out = res_critic.choices[0].message.content
+                st.session_state.total_tokens += res_critic.usage.total_tokens
 
-        # --- FASE 2: IL CRITICO VALUTA (Richiesta 2) ---
-        msg_critic = [
-            {"role": "system", "content": CRITIC_PROMPT},
-            {"role": "user", "content": f"Ecco la proposta dello Chef:\n{chef_text}\n\nRicorda i vincoli: {st.session_state.data_extracted}"}
-        ]
-        
-        res_critic = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=msg_critic,
-            temperature=0.1
-        )
-        
-        critic_feedback = res_critic.choices[0].message.content
-        st.session_state.total_tokens += res_critic.usage.total_tokens # Aggiorna token
+                with st.status("🧐 Validazione Critico...", expanded=False):
+                    st.write(critic_out)
 
-        # Mostriamo il processo di "pensiero" del sistema (Reflection)
-        with st.expander("🔍 Log di Validazione Multi-Agente"):
-            st.write("**Proposta Chef:**", chef_text)
-            st.write("**Verdetto Critico:**", critic_feedback)
+                # PULIZIA JSON
+                if "---JSON---" in chef_out:
+                    parts = chef_out.split("---JSON---")
+                    final_text = parts[0].strip()
+                    try: 
+                        st.session_state.data_extracted = json.loads(parts[1].strip())
+                    except: pass
+                else:
+                    final_text = chef_out
 
-        # --- FASE 3: ESITO FINALE ---
-        if "APPROVATO" in critic_feedback:
-            # Pulizia JSON e visualizzazione
-            if "---JSON_DATA---" in chef_text:
-                parts = chef_text.split("---JSON_DATA---")
-                final_answer = parts[0].strip()
-                try: st.session_state.data_extracted = json.loads(parts[1].strip())
-                except: pass
-            else:
-                final_answer = chef_text
-            
-            st.success("✅ Ricetta approvata dal Critico!")
-            st.markdown(final_answer)
-            
-            # Mostra immagine (Richiesta facoltativa precedente)
-            p_img = st.session_state.data_extracted.get("image_prompt")
-            if p_img:
-                encoded = urllib.parse.quote(p_img)
-                st.image(f"https://image.pollinations.ai/prompt/{encoded}?width=500&nologo=true")
-            
-            st.session_state.messages.append({"role": "assistant", "content": final_answer})
-        else:
-            error_msg = f"❌ Lo Chef ha commesso degli errori. Il Critico ha rifiutato: {critic_feedback}"
-            st.error(error_msg)
-            st.session_state.messages.append({"role": "assistant", "content": error_msg})
+                if "APPROVATO" in critic_out:
+                    st.success("✅ Approvato!")
+                    st.markdown(final_text)
+                    p_img = st.session_state.data_extracted.get("image_prompt")
+                    if p_img:
+                        st.image(f"https://image.pollinations.ai/prompt/{urllib.parse.quote(p_img)}?width=500")
+                else:
+                    st.error("❌ Rifiutato dal Critico!")
+                    st.info(critic_out)
+                
+                st.session_state.messages.append({"role": "assistant", "content": final_text})
+                st.rerun()
 
-        st.rerun()
+            except Exception as e:
+                st.error(f"Si è verificato un errore durante l'elaborazione. Prova a resettare.")
